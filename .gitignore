@@ -1,0 +1,7 @@
+# Exclude any exported tenant data, CSV reports, and JSON backups
+Export_Output*/
+TestRun_Output*/
+PreChange_Backup*/
+Backup_JSON/
+*.csv
+*.json
