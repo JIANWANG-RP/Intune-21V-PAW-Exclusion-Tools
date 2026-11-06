@@ -8,7 +8,7 @@
 > 2. 先在默认的 **DryRun（只读预览）** 模式下运行并核对控制台输出；
 > 3. 先在测试环境或少量非核心策略上验证，并妥善保管脚本自动生成的 `PreChange_Backup_<时间戳>` JSON 快照。
 
-本仓库包含两套针对 **世纪互联 (Azure China / 21Vianet)** 环境的 Intune PowerShell 自动化脚本，用于解决原生示例脚本仅支持全球版 (`graph.microsoft.com`) 且仅能导出单一策略类别的问题。
+本仓库包含三套针对 **世纪互联 (Azure China / 21Vianet)** 环境的 Intune PowerShell 自动化脚本（全量只读导出 + 批量追加 PAW 排除 + 一键应急回滚），用于解决原生示例脚本仅支持全球版 (`graph.microsoft.com`)、仅能导出单一策略类别且缺乏回滚保障的问题。
 
 ---
 
@@ -17,7 +17,8 @@
 | 脚本文件名 | 模式 | 作用说明 |
 | :--- | :--- | :--- |
 | **`Export-IntuneAssignments_21V.ps1`** | **纯只读 (GET)** | 导出 Intune 中全部 **10 大类**对象（App、App Config、Settings Catalog、Device Config、Admin Templates、Compliance、Endpoint Security、PowerShell Script、Proactive Remediation）的配置 JSON 备份及所有 Assignment 分配明细；自动识别哪些是给 **All Windows** 的，生成 Excel 审核表。 |
-| **`Add-IntunePAWExclusion_21V.ps1`** | **写入 (POST)** | 读取人工审核后的 CSV 表（将 `AddPAWExclusion` 标为 `Yes` 的行），在保留原有所有分配的前提下，批量追加 **PAW Exclusion Group**（或挂载 PAW Exclusion Filter）。默认开启 **DryRun 预览模式**，并在修改前自动备份原始分配快照。 |
+| **`Add-IntunePAWExclusion_21V.ps1`** | **写入 (POST)** | 读取人工审核后的 CSV 表（将 `AddPAWExclusion` 标为 `Yes` 的行），在保留原有所有分配的前提下，批量追加 **PAW Exclusion Group**（或挂载 PAW Exclusion Filter）。默认开启 **DryRun 预览模式**，并在修改前自动将原始分配保存至 `PreChange_Backup_<时间戳>`。 |
+| **`Restore-IntuneAssignments_21V.ps1`** | **回滚 (POST)** | **应急回滚脚本**：读取 `PreChange_Backup_<时间戳>`（或全量导出的 `Backup_JSON`），将指定对象或整批对象的 Intune Assignment **100% 还原**到修改前的原始快照状态（精准剥离后加的 PAW Exclusion）。默认开启 **DryRun 预览模式**，支持按单策略 ID (`-FilterItemId`) 或类别 (`-FilterCategory`) 精准回滚。 |
 
 ---
 
@@ -122,3 +123,51 @@ cd "C:\Scripts\Intune21V"
 4. **第 4 步（开机即隔离闭环）**：当管理员使用 PAW 专用账号在新机器 OOBE 界面登录注册时，Intune 会在下发任何策略**之前**，当场将该设备塞入 `SG-Intune-PAW-Devices`，**0 秒命中第 2 步提前布好的 Exclude 拦截网**，彻底杜绝 Tier 2 策略污染。
 
 ![世纪互联 21V PAW 事前隔离防线与 Enrollment Time Grouping 闭环架构](images/05_paw_isolation_workflow.png)
+
+---
+
+## 五、应急回滚方案 (Rollback Plan — `Restore-IntuneAssignments_21V.ps1`)
+
+在执行第三步 (`Add-IntunePAWExclusion_21V.ps1 -ExecuteChanges`) 时，脚本在调用 Graph `/assign` 接口修改任何策略/应用/脚本之前，都会先强制在本地生成 **`PreChange_Backup_<时间戳>`** 文件夹，并将每个对象修改前的原始 Assignment 完整保存为 `<Category>_<ItemId>_Before.json`（此外，第一步导出时生成的 `Export_Output_<时间戳>\Backup_JSON` 也包含全租户基线备份）。
+
+如果变更后发现某条策略不希望排除 PAW，或者需要整批撤回变更，可使用 **`Restore-IntuneAssignments_21V.ps1`** 实现秒级无损回滚。
+
+### 场景 1：先执行回滚 DryRun 预览（默认只读对比，不修改线上配置）
+默认不加 `-ExecuteRollback` 时，脚本会读取本地备份快照，并与 21V 线上当前生效的 Assignment 进行实时对比，展示回滚前后差异：
+
+```powershell
+.\Restore-IntuneAssignments_21V.ps1 `
+    -BackupFolderPath ".\PreChange_Backup_20260416_153000" `
+    -TenantId "<21V_TenantId>" `
+    -ClientId "<ClientId>" `
+    -ClientSecret "<ClientSecret>"
+```
+> 💡 若在无外网或离线机器上仅需核对本地备份内容及即将构造的 `/assign` 恢复报文，可附加 `-OfflineDryRun` 参数。
+
+### 场景 2：仅对某一个特定策略/应用执行精准单点回滚 (`-FilterItemId`)
+如果只需要回滚某一条特定策略或单个应用（例如发现某款安全软件在 PAW 上仍需安装），可指定 `-FilterItemId`（和可选的 `-FilterCategory`）并附加 `-ExecuteRollback`：
+
+```powershell
+.\Restore-IntuneAssignments_21V.ps1 `
+    -BackupFolderPath ".\PreChange_Backup_20260416_153000" `
+    -FilterItemId "<策略或应用的_ItemId_GUID>" `
+    -TenantId "<21V_TenantId>" `
+    -ClientId "<ClientId>" `
+    -ClientSecret "<ClientSecret>" `
+    -ExecuteRollback
+```
+
+### 场景 3：整批一键回滚（还原当次批量修改的所有对象）
+确认 DryRun 预览无误后，附加 `-ExecuteRollback` 即可将 `PreChange_Backup_<时间戳>` 中的所有对象一键还原为变更前的原始分配状态（精准剥离新增的 PAW Exclusion，同时完整保留原有的 Win32 应用安装参数、Delivery Optimization 设置、Filter 及所有原有分配组）：
+
+```powershell
+.\Restore-IntuneAssignments_21V.ps1 `
+    -BackupFolderPath ".\PreChange_Backup_20260416_153000" `
+    -TenantId "<21V_TenantId>" `
+    -ClientId "<ClientId>" `
+    -ClientSecret "<ClientSecret>" `
+    -ExecuteRollback
+```
+
+> 📋 **回滚审计日志**：每次运行 `Restore-IntuneAssignments_21V.ps1`（无论是 DryRun 还是正式回滚），脚本都会在备份目录同级自动生成 **`Rollback_AuditLog_<时间戳>.csv`**，完整记录每个对象的回滚前线上分配数、回滚后分配数、接口地址及执行状态，满足合规变更审计要求。
+
