@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     根据审核后的 CSV 表格，在世纪互联 (21Vianet) Intune 中批量为指定的 App、Script、Policy、Remediation 添加 PAW 排除 (Exclusion)。
 

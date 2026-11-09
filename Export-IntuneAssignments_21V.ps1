@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     导出世纪互联 (21Vianet / Azure China) Intune 中所有 App、Script、Policy、Remediation 的配置与 Assignment 明细。
     专门用于排查哪些策略/应用/脚本分配给了 "All Windows" (All Devices / All Users / Windows 动态组)，并生成可供批量添加 PAW Exclusion 的审核表。
