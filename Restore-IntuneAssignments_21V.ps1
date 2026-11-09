@@ -99,6 +99,10 @@ function Ensure-MgGraphAuthModule {
         }
     }
     Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+    # Disable WAM so interactive sign-in works inside Windows PowerShell ISE (which lacks a Win32 console window handle)
+    if (Get-Command Set-MgGraphOption -ErrorAction SilentlyContinue) {
+        Set-MgGraphOption -DisableLoginByWAM $true -ErrorAction SilentlyContinue
+    }
 }
 
 function Initialize-21VGraphAuth {

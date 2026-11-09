@@ -125,6 +125,10 @@ function Ensure-MgGraphAuthModule {
         Write-Host "[Module] Microsoft.Graph.Authentication 安装完成！" -ForegroundColor Green
     }
     Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+    # 兼容 Windows PowerShell ISE (无原生 Console Window Handle 导致 WAM 报错 A window handle must be configured)
+    if (Get-Command Set-MgGraphOption -ErrorAction SilentlyContinue) {
+        Set-MgGraphOption -DisableLoginByWAM $true -ErrorAction SilentlyContinue
+    }
 }
 
 function Initialize-21VGraphAuth {
