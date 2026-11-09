@@ -124,9 +124,17 @@ function Initialize-21VGraphAuth {
         "Group.Read.All"
     )
 
+    if (-not $UseInteractive -and [string]::IsNullOrWhiteSpace($ClientId)) {
+        Write-Host "[Auth] 未检测到命令行参数 -ClientId。默认进入 Service Principal (App Registration) 认证模式：" -ForegroundColor Cyan
+        $inputClientId = Read-Host "请输入 21V Service Principal 的 ClientId (AppId) [若直接按回车留空，则切换为浏览器交互式登录]"
+        if (-not [string]::IsNullOrWhiteSpace($inputClientId)) {
+            $ClientId = $inputClientId.Trim()
+        }
+    }
+
     if (-not $UseInteractive -and (-not [string]::IsNullOrWhiteSpace($ClientId))) {
         if ([string]::IsNullOrWhiteSpace($TenantId)) {
-            $TenantId = Read-Host "请输入 21V TenantId (例如 xxx.partner.onmschina.cn 或 GUID)"
+            $TenantId = (Read-Host "请输入 21V TenantId (例如 xxx.partner.onmschina.cn 或 GUID)").Trim()
         }
         if ([string]::IsNullOrWhiteSpace($ClientSecret)) {
             $secSecret = Read-Host "请输入 Service Principal ClientSecret" -AsSecureString
@@ -141,11 +149,16 @@ function Initialize-21VGraphAuth {
     else {
         $ctx = Get-MgContext
         if (-not $ctx -or $ctx.Environment -ne "China" -or $ctx.AuthType -ne "Delegated") {
-            Write-Host "[Auth] 正在调用 Connect-MgGraph -Environment China 进行交互式登录..." -ForegroundColor Yellow
+            Write-Host "[Auth] 正在调用 Connect-MgGraph -Environment China 进行交互式浏览器登录..." -ForegroundColor Yellow
+            if (Get-Command Set-MgGraphOption -ErrorAction SilentlyContinue) {
+                Set-MgGraphOption -DisableLoginByWAM $true -ErrorAction SilentlyContinue
+            }
+            # Workaround for Microsoft.Graph.Authentication 2.x bug where WamEnabled = DisableWAM ? !IsCustomClientId : true
+            $interactiveClientId = if (-not [string]::IsNullOrWhiteSpace($ClientId)) { $ClientId } else { "14d82eec-204b-4c2f-b7e8-296a70dab67e " }
             if ($TenantId) {
-                Connect-MgGraph -Environment China -TenantId $TenantId -Scopes $requiredIntunePerms -NoWelcome -ErrorAction Stop
+                Connect-MgGraph -Environment China -TenantId $TenantId -ClientId $interactiveClientId -Scopes $requiredIntunePerms -NoWelcome -ErrorAction Stop
             } else {
-                Connect-MgGraph -Environment China -Scopes $requiredIntunePerms -NoWelcome -ErrorAction Stop
+                Connect-MgGraph -Environment China -ClientId $interactiveClientId -Scopes $requiredIntunePerms -NoWelcome -ErrorAction Stop
             }
         }
     }

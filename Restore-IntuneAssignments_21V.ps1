@@ -128,9 +128,26 @@ function Initialize-21VGraphAuth {
     $hasValidTenant = (-not [string]::IsNullOrWhiteSpace($Tenant)) -and ($Tenant -notmatch '^<.*>$')
     $hasValidAppId  = (-not [string]::IsNullOrWhiteSpace($AppId))  -and ($AppId -notmatch '^<.*>$')
 
-    if (-not [string]::IsNullOrWhiteSpace($Secret) -and $hasValidTenant -and $hasValidAppId) {
-        Write-Host "[Auth] Connecting to Microsoft Graph China (21Vianet) using Client Secret (App-Only)..." -ForegroundColor Cyan
-        $secPass = ConvertTo-SecureString $Secret -AsPlainText -Force
+    if (-not $UseInteractive -and (-not $hasValidAppId)) {
+        Write-Host "[Auth] 未检测到命令行参数 -ClientId。默认进入 Service Principal (App Registration) 认证模式：" -ForegroundColor Cyan
+        $inputAppId = Read-Host "请输入 21V Service Principal 的 ClientId (AppId) [若直接按回车留空，则切换为浏览器交互式登录]"
+        if (-not [string]::IsNullOrWhiteSpace($inputAppId)) {
+            $AppId = $inputAppId.Trim()
+            $hasValidAppId = $true
+        }
+    }
+
+    if (-not $UseInteractive -and $hasValidAppId) {
+        if (-not $hasValidTenant) {
+            $Tenant = (Read-Host "请输入 21V TenantId (例如 xxx.partner.onmschina.cn 或 GUID)").Trim()
+            $hasValidTenant = -not [string]::IsNullOrWhiteSpace($Tenant)
+        }
+        if ([string]::IsNullOrWhiteSpace($Secret)) {
+            $secPass = Read-Host "请输入 Service Principal ClientSecret" -AsSecureString
+        } else {
+            $secPass = ConvertTo-SecureString $Secret -AsPlainText -Force
+        }
+        Write-Host "[Auth] Connecting to Microsoft Graph China (21Vianet) using Client Secret (App-Only: $AppId)..." -ForegroundColor Cyan
         $cred = New-Object System.Management.Automation.PSCredential($AppId, $secPass)
         Connect-MgGraph -Environment China -TenantId $Tenant -ClientSecretCredential $cred -NoWelcome -ErrorAction Stop
         $script:AuthMode = "MgGraph"
@@ -139,12 +156,15 @@ function Initialize-21VGraphAuth {
 
     $ctx = Get-MgContext -ErrorAction SilentlyContinue
     if ($null -ne $ctx -and $ctx.Environment -eq 'China') {
-        Write-Host "[Auth] Reusing active 21Vianet MgGraph session: $($ctx.Account) (Tenant: $($ctx.TenantId))" -ForegroundColor Green
+        Write-Host "[Auth] Reusing active 21Vianet MgGraph session: $($ctx.Account)$($ctx.ClientId) (Tenant: $($ctx.TenantId))" -ForegroundColor Green
         $script:AuthMode = "MgGraph"
         return
     }
 
-    Write-Host "[Auth] Launching interactive sign-in for Azure China (21Vianet)..." -ForegroundColor Yellow
+    Write-Host "[Auth] Launching interactive browser sign-in for Azure China (21Vianet)..." -ForegroundColor Yellow
+    if (Get-Command Set-MgGraphOption -ErrorAction SilentlyContinue) {
+        Set-MgGraphOption -DisableLoginByWAM $true -ErrorAction SilentlyContinue
+    }
     $scopes = @(
         "DeviceManagementApps.ReadWrite.All",
         "DeviceManagementConfiguration.ReadWrite.All",
@@ -152,11 +172,13 @@ function Initialize-21VGraphAuth {
         "DeviceManagementServiceConfig.ReadWrite.All",
         "Group.Read.All"
     )
+    # Workaround for Microsoft.Graph.Authentication 2.x bug where WamEnabled = DisableWAM ? !IsCustomClientId : true
+    $interactiveClientId = if ($hasValidAppId) { $AppId } else { "14d82eec-204b-4c2f-b7e8-296a70dab67e " }
     if ($hasValidTenant) {
-        Connect-MgGraph -Environment China -TenantId $Tenant -Scopes $scopes -NoWelcome -ErrorAction Stop
+        Connect-MgGraph -Environment China -TenantId $Tenant -ClientId $interactiveClientId -Scopes $scopes -NoWelcome -ErrorAction Stop
     }
     else {
-        Connect-MgGraph -Environment China -Scopes $scopes -NoWelcome -ErrorAction Stop
+        Connect-MgGraph -Environment China -ClientId $interactiveClientId -Scopes $scopes -NoWelcome -ErrorAction Stop
     }
     $script:AuthMode = "MgGraph"
 }
