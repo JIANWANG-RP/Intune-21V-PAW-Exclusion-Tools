@@ -22,25 +22,48 @@
 
 ---
 
-## 二、Service Principal (App Registration) 权限要求
+## 二、权限与认证方式说明（支持 Service Principal 与 `-UseInteractive` 交互式登录）
 
-如果使用 Service Principal (`TenantId` + `ClientId` + `ClientSecret`) 连接世纪互联 Microsoft Graph (`https://microsoftgraph.chinacloudapi.cn`)，请确保在 **Entra ID (portal.partner.microsoftonline.cn) -> 应用注册 -> API 权限** 中授予以下 **Application (应用程序) 权限** 并点击 **代表租户授予管理员同意**：
+本套脚本支持 **两种认证模式** 连接世纪互联 Microsoft Graph (`https://microsoftgraph.chinacloudapi.cn`)。企业可根据自身安全合规要求灵活选择（**推荐组合：第一步只读导出使用模式 A，第二步/第三步写入修改使用模式 B `-UseInteractive`**）：
 
-### 1. 只读导出阶段 (`Export-IntuneAssignments_21V.ps1`)
+| 对比维度 | 模式 A：Service Principal 密钥模式（默认） | 模式 B：`-UseInteractive` 交互式委托登录（推荐用于写入阶段） |
+| :--- | :--- | :--- |
+| **适用场景** | 自动化无人值守运行、只读全量导出 (`Export-IntuneAssignments_21V.ps1`) | 生产环境执行写入变更 (`Add-IntunePAWExclusion_21V.ps1`) 或回滚 (`Restore-IntuneAssignments_21V.ps1`)，安全团队不希望给 Client Secret 授予常驻高危 `ReadWrite` 应用权限 |
+| **API 权限类型** | **Application（应用程序权限）** | **Delegated（委托权限）** |
+| **凭证要求** | `TenantId` + `ClientId` + `ClientSecret` | `TenantId` + `ClientId` + **`-UseInteractive`**（无需 `ClientSecret`，由管理员本人交互式登录并完成 MFA） |
+| **安全优势** | 无需人工交互，适合定时/批量读取 | **最小权限原则 (Least Privilege)**：有效权限取 `App 委托权限 ∩ 登录管理员自身的 RBAC 角色`，即使 `ClientId` 泄露也无法脱离管理员本人登录去修改租户 |
+
+---
+
+### 1. 只读导出阶段 (`Export-IntuneAssignments_21V.ps1`) —— 推荐使用 Application 权限
+在 **Entra ID (`portal.partner.microsoftonline.cn`) -> 应用注册 -> API 权限** 中添加以下 **Application (应用程序)** 权限，并点击 **代表租户授予管理员同意 (Grant admin consent)**：
 - `DeviceManagementApps.Read.All`（读取应用、App Config）
 - `DeviceManagementConfiguration.Read.All`（读取 Settings Catalog、Device Config、Admin Templates、Compliance、Endpoint Security）
 - `DeviceManagementManagedDevices.Read.All`（读取受管设备相关策略）
 - **`DeviceManagementScripts.Read.All`**（⚠️ **必选**：用于读取 `deviceManagementScripts` PowerShell 脚本与 `deviceHealthScripts` Proactive Remediations，缺少此权限这两类会返回 403 Forbidden）
 - `Group.Read.All`（或 `Directory.Read.All`，用于把 Assignment 里的 Group GUID 翻译为可读的组名称）
 
-### 2. 批量添加排除阶段 (`Add-IntunePAWExclusion_21V.ps1`)
-- `DeviceManagementApps.ReadWrite.All`
-- `DeviceManagementConfiguration.ReadWrite.All`
-- `DeviceManagementManagedDevices.ReadWrite.All`
-- **`DeviceManagementScripts.ReadWrite.All`**（用于修改 PowerShell 脚本与 Proactive Remediations 的 Assignment）
-- `Group.Read.All`
+---
 
-> 💡 **自动检测与安装 `Microsoft.Graph.Authentication`**：这两份脚本在启动时会自动检查本机是否安装了 `Microsoft.Graph.Authentication` 模块；若未安装会自动以 `CurrentUser` 范围静默安装，随后调用 `Connect-MgGraph -Environment China` 与 `Invoke-MgGraphRequest`，并在连接后自动校验当前 Token 是否具备所需的 Intune 权限。
+### 2. 批量添加排除与回滚阶段 (`Add-IntunePAWExclusion_21V.ps1` / `Restore-IntuneAssignments_21V.ps1`)
+
+#### 方案 B1（推荐）：使用 `-UseInteractive` 交互式登录 + Delegated（委托）权限
+若安全合规要求不给应用密钥授予 `Application` 级别的 `ReadWrite` 权限，请按以下三步配置并使用 `-UseInteractive`：
+1. **配置 API 委托权限 (Delegated Permissions)**：在 App Registration 的 **API permissions -> Add a permission -> Microsoft Graph -> Delegated permissions（委托的权限）** 中按需添加以下权限，并点击 **Grant admin consent**：
+   - `DeviceManagementApps.ReadWrite.All`（修改应用与 App Config 分配时必选）
+   - `DeviceManagementConfiguration.ReadWrite.All`（修改配置策略、合规策略、Endpoint Security 分配时必选）
+   - `DeviceManagementManagedDevices.ReadWrite.All`（修改受管设备相关策略时必选）
+   - `DeviceManagementScripts.ReadWrite.All`（可选：仅当需要修改 PowerShell 脚本或 Proactive Remediations 分配时添加）
+   - `Group.Read.All`（可选：仅用于校验组对象信息）
+2. **开启公共客户端流 (Public Client Flows)**：在 App Registration 左侧菜单进入 **Authentication（身份验证）**：
+   - 将页面底部的 **Allow public client flows（允许公共客户端流）** 设为 **Yes（是）**；
+   - 点击 **Add a platform -> Mobile and desktop applications（移动和桌面应用程序）**，勾选或填入重定向 URI **`http://localhost`** 并保存。
+3. **登录账号角色要求**：执行脚本时交互式登录的管理员账号需具备 **Intune Administrator（Intune 管理员）**（或 Global Administrator）角色。
+
+#### 方案 B2：继续使用 Service Principal (`-ClientSecret`) + Application（应用程序）权限
+若使用无人值守的密钥模式执行写入，则上述 `ReadWrite.All` 权限必须添加为 **Application（应用程序权限）** 并点击 **Grant admin consent**（注意：若仅配置了 `Delegated` 权限却使用 `-ClientSecret` 登录，调用写入接口会报错 `403 Forbidden`）。
+
+> 💡 **自动检测与安装 `Microsoft.Graph.Authentication`**：三份脚本在启动时会自动检查本机是否安装了 `Microsoft.Graph.Authentication` 模块；若未安装会自动以 `CurrentUser` 范围静默安装，随后调用 `Connect-MgGraph -Environment China` 与 `Invoke-MgGraphRequest`，并在连接后自动校验当前会话或复用已登录的委托会话。
 
 ![Entra ID API 权限配置与管理员同意](images/01_entra_app_permissions.png)
 
@@ -85,18 +108,39 @@ cd "C:\Scripts\Intune21V"
 
 ### 第三步：批量添加 PAW Exclusion（先 DryRun 预览，再正式执行）
 
-#### 1. 先跑 DryRun 预览（默认不加 `-ExecuteChanges`，100% 只读预览，不会修改任何配置）
+脚本同时支持 **`-UseInteractive`（交互式委托权限登录，推荐）** 和 **Service Principal（`-ClientSecret` 应用密钥登录）** 两种方式：
+
+#### 方式 A（推荐）：使用 `-UseInteractive` 交互式管理员登录（基于 Delegated 委托权限）
 ```powershell
+# 1. 先跑 DryRun 预览（默认不加 -ExecuteChanges，100% 只读预览，不会修改任何配置）
+.\Add-IntunePAWExclusion_21V.ps1 `
+    -CsvPath ".\Export_Output_xxxx\Intune_Assignments_AllWindows_Candidates.csv" `
+    -PAWExclusionGroupId "<PAW设备组的Object_ID_GUID>" `
+    -TenantId "<21V_TenantId>" `
+    -ClientId "<ClientId>" `
+    -UseInteractive
+
+# 2. 确认预览输出无误后，加上 -ExecuteChanges 正式执行写入
+.\Add-IntunePAWExclusion_21V.ps1 `
+    -CsvPath ".\Export_Output_xxxx\Intune_Assignments_AllWindows_Candidates.csv" `
+    -PAWExclusionGroupId "<PAW设备组的Object_ID_GUID>" `
+    -TenantId "<21V_TenantId>" `
+    -ClientId "<ClientId>" `
+    -UseInteractive `
+    -ExecuteChanges
+```
+
+#### 方式 B：使用 Service Principal (`-ClientSecret`) 登录（基于 Application 应用权限）
+```powershell
+# 1. 先跑 DryRun 预览（默认不加 -ExecuteChanges，100% 只读预览）
 .\Add-IntunePAWExclusion_21V.ps1 `
     -CsvPath ".\Export_Output_xxxx\Intune_Assignments_AllWindows_Candidates.csv" `
     -PAWExclusionGroupId "<PAW设备组的Object_ID_GUID>" `
     -TenantId "<21V_TenantId>" `
     -ClientId "<ClientId>" `
     -ClientSecret "<ClientSecret>"
-```
 
-#### 2. 确认预览输出无误后，加上 `-ExecuteChanges` 正式执行写入
-```powershell
+# 2. 确认预览输出无误后，加上 -ExecuteChanges 正式执行写入
 .\Add-IntunePAWExclusion_21V.ps1 `
     -CsvPath ".\Export_Output_xxxx\Intune_Assignments_AllWindows_Candidates.csv" `
     -PAWExclusionGroupId "<PAW设备组的Object_ID_GUID>" `
@@ -105,9 +149,52 @@ cd "C:\Scripts\Intune21V"
     -ClientSecret "<ClientSecret>" `
     -ExecuteChanges
 ```
+
 正式执行前，脚本会自动在 `PreChange_Backup_<时间戳>` 目录下保存每个待修改对象的修改前 JSON 快照。
 
 ![第三步 DryRun 预览与正式写入对比示例](images/04_step3_dryrun_preview.png)
+
+---
+
+### 💡 常见认证报错与 `-UseDeviceCode`（设备代码登录）排错指南
+
+在企业内网环境中使用 `-UseInteractive` 进行交互式登录时，可按下面的方法分别处理登录窗口失败和管理员同意提示。**`-UseDeviceCode` 是 `Connect-MgGraph` 的参数，不是本套脚本的参数**：先在同一个 PowerShell 窗口登录，再让脚本复用已建立的 `China` + `Delegated` 会话。设备代码登录不会绕过管理员同意、MFA 或条件访问；租户策略也可能限制设备代码流。
+
+#### 报错 1：`The browser based authentication dialog failed to complete. Reason: The requested resource requires user authentication.`
+- **触发时机**：运行带 `-UseInteractive` 的脚本时，PowerShell 5.1 / ISE 弹出内置迷你登录窗口，输入账号后立刻闪退并报上述错误。
+- **可能原因**：浏览器登录链路中的身份验证、联合登录或代理认证未完成。仅凭这段错误不能确认是 ADFS、WIA 还是代理导致；需要进一步结合登录日志和网络错误判断。
+- **可尝试的替代方式（使用 `-UseDeviceCode` 在独立浏览器中完成认证）**：
+  1. 在同一个 PowerShell 窗口中，先手动执行以下命令发起 **设备代码登录 (Device Code Flow)**。这一步只断开旧 Graph 会话并建立新会话，不修改租户配置；`-Scopes` 应按本次实际操作及已获同意的 Delegated 权限选择：
+     ```powershell
+     Disconnect-MgGraph -ErrorAction SilentlyContinue
+
+     Connect-MgGraph -Environment China `
+         -TenantId "<21V_TenantId>" `
+         -ClientId "<ClientId>" `
+         -Scopes "DeviceManagementApps.ReadWrite.All", "DeviceManagementConfiguration.ReadWrite.All", "DeviceManagementManagedDevices.ReadWrite.All" `
+         -UseDeviceCode
+     ```
+  2. 控制台会输出验证网址和 **设备代码 (Device Code)**，请使用本次命令实际显示的网址与代码。
+  3. 在日常浏览器（Edge / Chrome）打开该验证网址，输入设备代码并使用目标租户的 **Intune 管理员账号** 完成登录及适用的 MFA。等待 PowerShell 命令成功返回，并用 `Get-MgContext` 核对 `Environment` 为 `China`、`AuthType` 为 `Delegated`，以及 `TenantId`、`ClientId` 和 `Scopes` 符合本次操作。
+  4. **保持在同一个 PowerShell 窗口**，先运行脚本预览（带上 `-UseInteractive`，不加 `-ExecuteChanges`，不修改租户配置）：
+     ```powershell
+     .\Add-IntunePAWExclusion_21V.ps1 `
+         -CsvPath ".\Export_Output_xxxx\Intune_Assignments_AllWindows_Candidates.csv" `
+         -PAWExclusionGroupId "<PAW设备组的Object_ID_GUID>" `
+         -TenantId "<21V_TenantId>" `
+         -ClientId "<ClientId>" `
+         -UseInteractive
+     ```
+     脚本检测到可复用的会话时，会打印 **`[Auth] 已复用现有 21V Graph 交互式会话`**，无需再次打开交互式登录窗口。核对 DryRun 结果后，如需正式写入，再按第三步的说明添加 `-ExecuteChanges`。
+
+#### 报错 2：浏览器登录时弹出 `Need admin approval`（需要管理员批准）
+- **触发时机**：使用 `-UseInteractive` 或 `-UseDeviceCode` 登录输入密码后，浏览器卡在 **"Need admin approval (<应用名> needs permission to access resources in your organization that only an admin can grant)"**。
+- **本次排查发现**：请求的 `Group.Read.All` 与 `DeviceManagementScripts.ReadWrite.All` 触发了管理员同意提示；移除这两个 scope 后，客户通过设备代码成功登录并执行了所需的 PAW 排除操作。
+- **检查方向**：请求的 Delegated 权限是否已获得所需的管理员同意，以及租户的用户同意策略是否允许本次请求。已授予的 **Application 权限不等于 Delegated 权限已获同意**；切换到设备代码流不会改变这一点。
+- **解决方案**：
+  - 对本次任务**不需要**的可选权限，可从 `Connect-MgGraph -Scopes` 中移除，按上方示例仅请求本次操作需要且已获同意的权限。
+  - 对本次任务**确实需要**的权限，应由有权授予同意的管理员添加相应 **Delegated** 权限并完成 **Grant admin consent**，而不是单纯删除 scope。
+  - **登录成功不代表所有类别都可读写**：上方三个 scope 的示例不包含 `Group.Read.All` 或 `DeviceManagementScripts.ReadWrite.All`。若后续接口返回 `403 Forbidden`，应按该接口在 21V 支持的权限要求排查；不能据此认定这些权限对所有场景都不需要。
 
 ---
 
@@ -133,16 +220,17 @@ cd "C:\Scripts\Intune21V"
 如果变更后发现某条策略不希望排除 PAW，或者需要整批撤回变更，可使用 **`Restore-IntuneAssignments_21V.ps1`** 实现秒级无损回滚。
 
 ### 场景 1：先执行回滚 DryRun 预览（默认只读对比，不修改线上配置）
-默认不加 `-ExecuteRollback` 时，脚本会读取本地备份快照，并与 21V 线上当前生效的 Assignment 进行实时对比，展示回滚前后差异：
+默认不加 `-ExecuteRollback` 时，脚本会读取本地备份快照，并与 21V 线上当前生效的 Assignment 进行实时对比，展示回滚前后差异（同样支持 `-UseInteractive` 交互式登录或 `-ClientSecret` 密钥登录）：
 
 ```powershell
+# 使用 -UseInteractive 交互式登录（若已通过 Connect-MgGraph -UseDeviceCode 登录，会自动直接复用）
 .\Restore-IntuneAssignments_21V.ps1 `
     -BackupFolderPath ".\PreChange_Backup_20260416_153000" `
     -TenantId "<21V_TenantId>" `
     -ClientId "<ClientId>" `
-    -ClientSecret "<ClientSecret>"
+    -UseInteractive
 ```
-> 💡 若在无外网或离线机器上仅需核对本地备份内容及即将构造的 `/assign` 恢复报文，可附加 `-OfflineDryRun` 参数。
+> 💡 若使用 Service Principal 密钥登录，将 `-UseInteractive` 替换为 `-ClientSecret "<ClientSecret>"` 即可；若在无外网或离线机器上仅需核对本地备份内容及即将构造的 `/assign` 恢复报文，可附加 `-OfflineDryRun` 参数。
 
 ### 场景 2：仅对某一个特定策略/应用执行精准单点回滚 (`-FilterItemId`)
 如果只需要回滚某一条特定策略或单个应用（例如发现某款安全软件在 PAW 上仍需安装），可指定 `-FilterItemId`（和可选的 `-FilterCategory`）并附加 `-ExecuteRollback`：
@@ -153,7 +241,7 @@ cd "C:\Scripts\Intune21V"
     -FilterItemId "<策略或应用的_ItemId_GUID>" `
     -TenantId "<21V_TenantId>" `
     -ClientId "<ClientId>" `
-    -ClientSecret "<ClientSecret>" `
+    -UseInteractive `
     -ExecuteRollback
 ```
 
@@ -165,7 +253,7 @@ cd "C:\Scripts\Intune21V"
     -BackupFolderPath ".\PreChange_Backup_20260416_153000" `
     -TenantId "<21V_TenantId>" `
     -ClientId "<ClientId>" `
-    -ClientSecret "<ClientSecret>" `
+    -UseInteractive `
     -ExecuteRollback
 ```
 
